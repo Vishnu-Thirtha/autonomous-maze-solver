@@ -17,6 +17,6 @@ Each maze is a **perfect maze** (no loops) and is translated into a **Gazebo wor
 
 ## Demo
 
-Below is a demo of a generated 10x10 maze in Gazebo:
+Below is a demo of a generated 15x15 maze in Gazebo:
 
 ![Maze in Gazebo](assets/maze.png)
