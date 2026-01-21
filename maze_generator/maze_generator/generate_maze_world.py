@@ -167,6 +167,10 @@ def save_world(maze, filename):
     sdf = Element("sdf", {"version": "1.6"})
     world = SubElement(sdf, "world", {"name": "maze"})
 
+    include = SubElement(world, "include")
+    uri = SubElement(include, "uri")
+    uri.text = "model://ground_plane"
+    
     for r in range(maze.rows):
         for c in range(maze.cols):
             cell = maze.grid[r][c]
