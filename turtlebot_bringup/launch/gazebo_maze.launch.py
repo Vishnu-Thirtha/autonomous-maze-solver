@@ -9,6 +9,7 @@ from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from ament_index_python.packages import get_package_share_directory
 
+CELL_SIZE = 1.0  # size of a maze cell in meters
 
 def generate_launch_description():
 
@@ -16,8 +17,8 @@ def generate_launch_description():
     # Launch arguments
     # --------------------------
     world_arg = LaunchConfiguration('world')
-    x_pose = LaunchConfiguration('x')
-    y_pose = LaunchConfiguration('y')
+    maze_rows = LaunchConfiguration('maze_rows')
+    maze_cols = LaunchConfiguration('maze_cols')
     yaw = LaunchConfiguration('yaw')
     use_sim_time = LaunchConfiguration('use_sim_time')
 
@@ -26,8 +27,8 @@ def generate_launch_description():
         default_value='',
         description='Path to world file. If empty or missing, empty_world will be loaded.'
     )
-    declare_x = DeclareLaunchArgument('x', default_value='0.0')
-    declare_y = DeclareLaunchArgument('y', default_value='0.0')
+    declare_maze_rows = DeclareLaunchArgument('maze_rows', default_value='10')
+    declare_maze_cols = DeclareLaunchArgument('maze_cols', default_value='10')
     declare_yaw = DeclareLaunchArgument('yaw', default_value='0.0')
     declare_sim_time = DeclareLaunchArgument('use_sim_time', default_value='true')
 
@@ -57,6 +58,16 @@ def generate_launch_description():
             if world != '':
                 print(f"[WARN] World file {world} not found, loading empty world instead.")
             world = empty_world_path
+
+        # Maze dimensions
+        rows = int(maze_rows.perform(context))
+        cols = int(maze_cols.perform(context))
+
+        # --------------------------
+        # Compute top-left cell spawn position
+        # --------------------------
+        x_spawn = 0 * CELL_SIZE + CELL_SIZE / 2            # leftmost column
+        y_spawn = (rows - 1) * CELL_SIZE + CELL_SIZE / 2  # top row
 
         # --------------------------
         # Gazebo server
@@ -88,27 +99,26 @@ def generate_launch_description():
         )
 
         # --------------------------
-        # Spawn a single TurtleBot3
+        # Spawn a single TurtleBot3 at top-left
         # --------------------------
         spawn_tb3 = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            os.path.join(tb3_launch_dir, 'spawn_turtlebot3.launch.py')
-        ),
-        launch_arguments={
-            'x_pose': x_pose,
-            'y_pose': y_pose,
-            'z_pose': '0.0',  # original launch uses 0
-            'yaw': yaw
-        }.items()
-)
-
+            PythonLaunchDescriptionSource(
+                os.path.join(tb3_launch_dir, 'spawn_turtlebot3.launch.py')
+            ),
+            launch_arguments={
+                'x_pose': str(x_spawn),
+                'y_pose': str(y_spawn),
+                'z_pose': '0.01',  # small offset above ground
+                'yaw': yaw
+            }.items()
+        )
 
         return [gzserver, gzclient, robot_state_publisher, spawn_tb3]
 
     return LaunchDescription([
         declare_world,
-        declare_x,
-        declare_y,
+        declare_maze_rows,
+        declare_maze_cols,
         declare_yaw,
         declare_sim_time,
         OpaqueFunction(function=launch_setup)
