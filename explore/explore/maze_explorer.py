@@ -3,7 +3,7 @@
 import rclpy
 from rclpy.node import Node
 from nav_msgs.msg import OccupancyGrid
-from geometry_msgs.msg import PoseStamped, Point
+from geometry_msgs.msg import PoseStamped
 from nav2_msgs.action import NavigateToPose
 from visualization_msgs.msg import Marker, MarkerArray
 from rclpy.action import ActionClient
@@ -19,11 +19,11 @@ class MazeExplorer(Node):
         super().__init__('maze_explorer')
 
         # ---------------- Parameters ----------------
-        self.robot_radius = 0.3        # meters
-        self.cost_threshold = 50       # ignore inflated/lethal
-        self.timer_period = 2.0        # exploration loop
-        self.target_reached_tol = 0.25 # meters to consider target reached
-        self.oscillation_memory = 5    # number of recent targets to avoid oscillation
+        self.robot_radius = 0.5
+        self.cost_threshold = 50
+        self.timer_period = 2.0
+        self.target_reached_tol = 2.0
+        self.oscillation_memory = 5
 
         # ---------------- TF ----------------
         self.tf_buffer = Buffer()
@@ -46,15 +46,19 @@ class MazeExplorer(Node):
         self.exploring = True
         self.current_target = None
         self.recent_targets = deque(maxlen=self.oscillation_memory)
+        self.goal_handle = None
 
-        # Timer for exploration loop
+        # ✅ NEW: persistent favorable frontier memory
+        self.favorable_frontiers = set()
+
         self.timer = self.create_timer(self.timer_period, self.explore)
 
         self.get_logger().info("Maze Explorer started.")
 
-    # ---------------- Callbacks ----------------
+    # ---------------- Costmap Callback ----------------
     def costmap_callback(self, msg):
         self.costmap = msg
+        self.prune_invalid_frontiers()
 
     # ---------------- TF Robot Pose ----------------
     def get_robot_pose(self):
@@ -64,109 +68,97 @@ class MazeExplorer(Node):
         except (LookupException, ConnectivityException, ExtrapolationException):
             return None
 
-    # ---------------- Map Cell → World ----------------
+    # ---------------- Cell → World ----------------
     def cell_to_world(self, x, y):
         res = self.costmap.info.resolution
         origin = self.costmap.info.origin.position
-        wx = origin.x + (x + 0.5) * res
-        wy = origin.y + (y + 0.5) * res
-        return wx, wy
-
-    # ---------------- Detect Boundary Unknown Cells ----------------
-    def detect_boundary_targets(self):
-        if self.costmap is None:
-            return []
-
-        data = np.array(self.costmap.data).reshape(
-            self.costmap.info.height, self.costmap.info.width
+        return (
+            origin.x + (x + 0.5) * res,
+            origin.y + (y + 0.5) * res
         )
+
+    # ---------------- Detect Favorable Frontiers ----------------
+    def detect_favorable_frontiers(self):
+        data = np.array(self.costmap.data).reshape(
+            self.costmap.info.height,
+            self.costmap.info.width
+        )
+
         h, w = data.shape
-        candidates = []
 
-        for y in range(1, h-1):
-            for x in range(1, w-1):
+        for y in range(1, h - 1):
+            for x in range(1, w - 1):
                 if data[y, x] == -1:
-                    neighbors = data[y-1:y+2, x-1:x+2]
-                    if 0 in neighbors:  # free neighbor → boundary
-                        candidates.append((x, y))
-        return candidates
+                    neighbors = data[y - 1:y + 2, x - 1:x + 2]
+                    if np.any(neighbors == -1):
+                        self.favorable_frontiers.add((x, y))
 
-    # ---------------- Filter targets too close to robot ----------------
+    # ---------------- Prune Invalid Frontiers ----------------
+    def prune_invalid_frontiers(self):
+        if self.costmap is None:
+            return
+
+        data = self.costmap.data
+        w = self.costmap.info.width
+
+        to_remove = []
+        for (x, y) in self.favorable_frontiers:
+            idx = y * w + x
+            if idx < 0 or idx >= len(data) or data[idx] != -1:
+                to_remove.append((x, y))
+
+        for cell in to_remove:
+            self.favorable_frontiers.discard(cell)
+
+    # ---------------- Filter Near Robot ----------------
     def filter_near_robot(self, targets):
         pose = self.get_robot_pose()
         if pose is None:
             return targets
+
         rx, ry = pose
-        filtered = []
-        for (x, y) in targets:
-            wx, wy = self.cell_to_world(x, y)
-            if math.hypot(wx - rx, wy - ry) >= self.robot_radius:
-                filtered.append((x, y))
-        return filtered
+        return [
+            (x, y) for (x, y) in targets
+            if math.hypot(*(np.array(self.cell_to_world(x, y)) - np.array([rx, ry]))) >= self.robot_radius
+        ]
 
-    # ---------------- Convert cell → costmap index ----------------
-    def cell_to_costmap_index(self, x_cell, y_cell):
-        if self.costmap is None:
-            return None
-        res = self.costmap.info.resolution
-        origin = self.costmap.info.origin.position
-        wx, wy = self.cell_to_world(x_cell, y_cell)
-        cx = int((wx - origin.x) / res)
-        cy = int((wy - origin.y) / res)
-        if cx < 0 or cy < 0 or cx >= self.costmap.info.width or cy >= self.costmap.info.height:
-            return None
-        return cy * self.costmap.info.width + cx
-
-    # ---------------- Publish Targets ----------------
+    # ---------------- Visualization ----------------
     def publish_targets(self, targets):
         ma = MarkerArray()
+
         for i, (x, y) in enumerate(targets):
             wx, wy = self.cell_to_world(x, y)
             m = Marker()
             m.header.frame_id = "map"
             m.header.stamp = self.get_clock().now().to_msg()
-            m.ns = "targets"
+            m.ns = "frontiers"
             m.id = i
             m.type = Marker.SPHERE
             m.action = Marker.ADD
             m.pose.position.x = wx
             m.pose.position.y = wy
             m.pose.position.z = 0.05
-            m.pose.orientation.w = 1.0
             m.scale.x = m.scale.y = m.scale.z = 0.08
             m.color.b = 1.0
             m.color.a = 0.8
             ma.markers.append(m)
+
         self.frontier_pub.publish(ma)
 
-    # ---------------- Publish Goal ----------------
-    def publish_goal_marker(self, wx, wy):
-        m = Marker()
-        m.header.frame_id = "map"
-        m.header.stamp = self.get_clock().now().to_msg()
-        m.ns = "goal"
-        m.id = 0
-        m.type = Marker.SPHERE
-        m.action = Marker.ADD
-        m.pose.position.x = wx
-        m.pose.position.y = wy
-        m.pose.position.z = 0.1
-        m.pose.orientation.w = 1.0
-        m.scale.x = m.scale.y = m.scale.z = 0.15
-        m.color.r = 1.0
-        m.color.a = 1.0
-        self.goal_pub.publish(m)
-
-    # ---------------- Send Goal ----------------
+    # ---------------- Send Nav Goal ----------------
     def send_goal(self, wx, wy):
         goal = NavigateToPose.Goal()
         goal.pose.header.frame_id = "map"
         goal.pose.pose.position.x = wx
         goal.pose.pose.position.y = wy
         goal.pose.pose.orientation.w = 1.0
+
         self.nav_client.wait_for_server()
-        self.nav_client.send_goal_async(goal)
-        self.get_logger().info(f"Exploring → ({wx:.2f}, {wy:.2f})")
+        future = self.nav_client.send_goal_async(goal)
+        future.add_done_callback(self.goal_response_callback)
+
+    def goal_response_callback(self, future):
+        self.goal_handle = future.result()
 
     # ---------------- Exploration Loop ----------------
     def explore(self):
@@ -176,57 +168,52 @@ class MazeExplorer(Node):
         pose = self.get_robot_pose()
         if pose is None:
             return
+
         rx, ry = pose
 
-        # ---------------- Detect candidate targets ----------------
-        candidates = self.detect_boundary_targets()
+        # ✅ Update frontier memory
+        self.detect_favorable_frontiers()
+
+        candidates = list(self.favorable_frontiers)
         candidates = self.filter_near_robot(candidates)
 
-        # ---------------- Publish candidate markers ----------------
         self.publish_targets(candidates)
 
-        # ---------------- Check if current target reached ----------------
+        # -------- Target validity check --------
         if self.current_target:
             wx, wy = self.cell_to_world(*self.current_target)
             dist = math.hypot(wx - rx, wy - ry)
+
             idx = self.cell_to_costmap_index(*self.current_target)
-            target_cost = None
-            if idx is not None:
-                target_cost = self.costmap.data[idx]
+            cost = self.costmap.data[idx] if idx is not None else None
 
-            if dist <= self.target_reached_tol or \
-               target_cost is None or target_cost >= self.cost_threshold:
-                self.get_logger().info(f"Target at {self.current_target} reached or blocked.")
+            if dist <= self.target_reached_tol or cost != -1:
                 self.recent_targets.append(self.current_target)
-                self.current_target = None  # allow choosing a new target
+                self.favorable_frontiers.discard(self.current_target)
+                self.current_target = None
 
-        # ---------------- Pick new target if none ----------------
+        # -------- Choose new target --------
         if self.current_target is None and candidates:
-            # ---------------- Simple scoring: farthest from robot + unknown neighbors ----------------
-            data = np.array(self.costmap.data).reshape(
-                self.costmap.info.height, self.costmap.info.width
-            )
             scores = []
             for (x, y) in candidates:
                 if (x, y) in self.recent_targets:
-                    scores.append(-np.inf)  # avoid oscillation
+                    scores.append(-np.inf)
                     continue
                 wx, wy = self.cell_to_world(x, y)
-                dist = math.hypot(wx - rx, wy - ry)
-                neighbors = data[max(0, y-1):y+2, max(0, x-1):x+2]
-                unknown_count = np.sum(neighbors == -1)
-                score = dist + unknown_count
-                scores.append(score)
+                scores.append(math.hypot(wx - rx, wy - ry))
 
-            best_idx = np.argmax(scores)
-            self.current_target = candidates[best_idx]
-
-            wx, wy = self.cell_to_world(*self.current_target)
+            best = candidates[np.argmax(scores)]
+            self.current_target = best
+            wx, wy = self.cell_to_world(*best)
             self.send_goal(wx, wy)
-            self.publish_goal_marker(wx, wy)
+
+    # ---------------- Costmap Index ----------------
+    def cell_to_costmap_index(self, x, y):
+        w = self.costmap.info.width
+        idx = y * w + x
+        return idx if 0 <= idx < len(self.costmap.data) else None
 
 
-# ---------------- Main ----------------
 def main(args=None):
     rclpy.init(args=args)
     node = MazeExplorer()
