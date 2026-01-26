@@ -7,60 +7,49 @@ from geometry_msgs.msg import PoseStamped
 from nav2_msgs.action import NavigateToPose
 from visualization_msgs.msg import Marker, MarkerArray
 from rclpy.action import ActionClient
-from tf2_ros import Buffer, TransformListener
-from tf2_ros import LookupException, ConnectivityException, ExtrapolationException
+from tf2_ros import Buffer, TransformListener, LookupException, ConnectivityException, ExtrapolationException
 import numpy as np
 import math
-from collections import deque
+import random
 
-
-class MazeExplorer(Node):
+class FrontierExplorer(Node):
     def __init__(self):
-        super().__init__('maze_explorer')
+        super().__init__('frontier_explorer')
 
-        # ---------------- Parameters ----------------
+        # Parameters
         self.robot_radius = 0.5
-        self.cost_threshold = 50
-        self.timer_period = 2.0
-        self.target_reached_tol = 2.0
-        self.oscillation_memory = 5
+        self.target_reached_tol = 1.0
 
-        # ---------------- TF ----------------
+        # TF
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
-        # ---------------- Subscribers ----------------
+        # Subscribers
         self.costmap_sub = self.create_subscription(
             OccupancyGrid, '/global_costmap/costmap', self.costmap_callback, 10
         )
 
-        # ---------------- Publishers ----------------
+        # Publishers
         self.frontier_pub = self.create_publisher(MarkerArray, '/frontiers', 10)
-        self.goal_pub = self.create_publisher(Marker, '/exploration_goal', 10)
 
-        # ---------------- Nav2 Action Client ----------------
+        # Nav2 Client
         self.nav_client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
 
-        # ---------------- State ----------------
+        # State
         self.costmap = None
-        self.exploring = True
-        self.current_target = None
-        self.recent_targets = deque(maxlen=self.oscillation_memory)
-        self.goal_handle = None
+        self.frontiers = []
+        self.current_goal = None
 
-        # ✅ NEW: persistent favorable frontier memory
-        self.favorable_frontiers = set()
+        self.create_timer(1.0, self.explore)
 
-        self.timer = self.create_timer(self.timer_period, self.explore)
+        self.get_logger().info("Frontier Explorer started.")
 
-        self.get_logger().info("Maze Explorer started.")
-
-    # ---------------- Costmap Callback ----------------
+    # ---------------- Costmap ----------------
     def costmap_callback(self, msg):
         self.costmap = msg
-        self.prune_invalid_frontiers()
+        self.detect_frontiers()
 
-    # ---------------- TF Robot Pose ----------------
+    # ---------------- Robot Pose ----------------
     def get_robot_pose(self):
         try:
             tf = self.tf_buffer.lookup_transform('map', 'base_link', rclpy.time.Time())
@@ -68,70 +57,36 @@ class MazeExplorer(Node):
         except (LookupException, ConnectivityException, ExtrapolationException):
             return None
 
-    # ---------------- Cell → World ----------------
+    # ---------------- Frontier Detection ----------------
+    def detect_frontiers(self):
+        if self.costmap is None:
+            return
+        data = np.array(self.costmap.data).reshape(
+            self.costmap.info.height, self.costmap.info.width
+        )
+        frontiers = []
+        h, w = data.shape
+        for y in range(1, h-1):
+            for x in range(1, w-1):
+                if data[y, x] == -1 and np.any(data[y-1:y+2, x-1:x+2] == 0):
+                    frontiers.append((x, y))
+        self.frontiers = frontiers
+        self.publish_frontiers()
+
+    # ---------------- Convert ----------------
     def cell_to_world(self, x, y):
         res = self.costmap.info.resolution
         origin = self.costmap.info.origin.position
-        return (
-            origin.x + (x + 0.5) * res,
-            origin.y + (y + 0.5) * res
-        )
-
-    # ---------------- Detect Favorable Frontiers ----------------
-    def detect_favorable_frontiers(self):
-        data = np.array(self.costmap.data).reshape(
-            self.costmap.info.height,
-            self.costmap.info.width
-        )
-
-        h, w = data.shape
-
-        for y in range(1, h - 1):
-            for x in range(1, w - 1):
-                if data[y, x] == -1:
-                    neighbors = data[y - 1:y + 2, x - 1:x + 2]
-                    if np.any(neighbors == -1):
-                        self.favorable_frontiers.add((x, y))
-
-    # ---------------- Prune Invalid Frontiers ----------------
-    def prune_invalid_frontiers(self):
-        if self.costmap is None:
-            return
-
-        data = self.costmap.data
-        w = self.costmap.info.width
-
-        to_remove = []
-        for (x, y) in self.favorable_frontiers:
-            idx = y * w + x
-            if idx < 0 or idx >= len(data) or data[idx] != -1:
-                to_remove.append((x, y))
-
-        for cell in to_remove:
-            self.favorable_frontiers.discard(cell)
-
-    # ---------------- Filter Near Robot ----------------
-    def filter_near_robot(self, targets):
-        pose = self.get_robot_pose()
-        if pose is None:
-            return targets
-
-        rx, ry = pose
-        return [
-            (x, y) for (x, y) in targets
-            if math.hypot(*(np.array(self.cell_to_world(x, y)) - np.array([rx, ry]))) >= self.robot_radius
-        ]
+        return origin.x + (x + 0.5) * res, origin.y + (y + 0.5) * res
 
     # ---------------- Visualization ----------------
-    def publish_targets(self, targets):
+    def publish_frontiers(self):
         ma = MarkerArray()
-
-        for i, (x, y) in enumerate(targets):
+        for i, (x, y) in enumerate(self.frontiers):
             wx, wy = self.cell_to_world(x, y)
             m = Marker()
             m.header.frame_id = "map"
             m.header.stamp = self.get_clock().now().to_msg()
-            m.ns = "frontiers"
             m.id = i
             m.type = Marker.SPHERE
             m.action = Marker.ADD
@@ -142,10 +97,9 @@ class MazeExplorer(Node):
             m.color.b = 1.0
             m.color.a = 0.8
             ma.markers.append(m)
-
         self.frontier_pub.publish(ma)
 
-    # ---------------- Send Nav Goal ----------------
+    # ---------------- Send Goal ----------------
     def send_goal(self, wx, wy):
         goal = NavigateToPose.Goal()
         goal.pose.header.frame_id = "map"
@@ -154,69 +108,47 @@ class MazeExplorer(Node):
         goal.pose.pose.orientation.w = 1.0
 
         self.nav_client.wait_for_server()
-        future = self.nav_client.send_goal_async(goal)
-        future.add_done_callback(self.goal_response_callback)
+        self.nav_client.send_goal_async(goal)
+        self.current_goal = (wx, wy)
 
-    def goal_response_callback(self, future):
-        self.goal_handle = future.result()
-
-    # ---------------- Exploration Loop ----------------
+    # ---------------- Exploration ----------------
     def explore(self):
-        if not self.exploring or self.costmap is None:
+        if self.costmap is None:
             return
 
         pose = self.get_robot_pose()
         if pose is None:
             return
-
         rx, ry = pose
 
-        # ✅ Update frontier memory
-        self.detect_favorable_frontiers()
+        # Remove reached frontiers
+        if self.current_goal:
+            gx, gy = self.current_goal
+            if math.hypot(gx - rx, gy - ry) < self.target_reached_tol:
+                self.current_goal = None
+                self.frontiers = [f for f in self.frontiers if self.cell_to_world(*f) != (gx, gy)]
 
-        candidates = list(self.favorable_frontiers)
-        candidates = self.filter_near_robot(candidates)
+        if self.current_goal or not self.frontiers:
+            return
 
-        self.publish_targets(candidates)
+        # ---------------- Probabilistic frontier selection ----------------
+        # Weight: far frontiers slightly more likely, but keep some near
+        distances = [math.hypot(rx - self.cell_to_world(x, y)[0],
+                                ry - self.cell_to_world(x, y)[1])
+                     for x, y in self.frontiers]
+        # Avoid division by zero
+        weights = [d + 0.1 for d in distances]
+        total = sum(weights)
+        probs = [w / total for w in weights]
 
-        # -------- Target validity check --------
-        if self.current_target:
-            wx, wy = self.cell_to_world(*self.current_target)
-            dist = math.hypot(wx - rx, wy - ry)
-
-            idx = self.cell_to_costmap_index(*self.current_target)
-            cost = self.costmap.data[idx] if idx is not None else None
-
-            if dist <= self.target_reached_tol or cost != -1:
-                self.recent_targets.append(self.current_target)
-                self.favorable_frontiers.discard(self.current_target)
-                self.current_target = None
-
-        # -------- Choose new target --------
-        if self.current_target is None and candidates:
-            scores = []
-            for (x, y) in candidates:
-                if (x, y) in self.recent_targets:
-                    scores.append(-np.inf)
-                    continue
-                wx, wy = self.cell_to_world(x, y)
-                scores.append(math.hypot(wx - rx, wy - ry))
-
-            best = candidates[np.argmax(scores)]
-            self.current_target = best
-            wx, wy = self.cell_to_world(*best)
-            self.send_goal(wx, wy)
-
-    # ---------------- Costmap Index ----------------
-    def cell_to_costmap_index(self, x, y):
-        w = self.costmap.info.width
-        idx = y * w + x
-        return idx if 0 <= idx < len(self.costmap.data) else None
+        selected = random.choices(self.frontiers, weights=probs, k=1)[0]
+        wx, wy = self.cell_to_world(*selected)
+        self.send_goal(wx, wy)
 
 
 def main(args=None):
     rclpy.init(args=args)
-    node = MazeExplorer()
+    node = FrontierExplorer()
     rclpy.spin(node)
     node.destroy_node()
     rclpy.shutdown()
