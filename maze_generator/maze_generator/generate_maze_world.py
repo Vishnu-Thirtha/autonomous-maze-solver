@@ -29,7 +29,6 @@ class Maze:
         self.cols = cols
         self.grid = [[Cell(r, c) for c in range(cols)] for r in range(rows)]
 
-    # Neighbors generator
     def neighbors(self, cell):
         dirs = {
             "N": (cell.r - 1, cell.c),
@@ -41,13 +40,11 @@ class Maze:
             if 0 <= r < self.rows and 0 <= c < self.cols:
                 yield d, self.grid[r][c]
 
-    # Remove wall between two cells
     def remove_wall(self, c1, c2, d):
         opp = {"N": "S", "S": "N", "E": "W", "W": "E"}
         c1.walls[d] = False
         c2.walls[opp[d]] = False
 
-    # DFS maze generation
     def generate_dfs(self):
         stack = []
         cur = self.grid[0][0]
@@ -65,7 +62,6 @@ class Maze:
             else:
                 break
 
-    # Prim's maze generation
     def generate_prim(self):
         start = self.grid[0][0]
         start.visited = True
@@ -80,21 +76,19 @@ class Maze:
                     if not nn.visited:
                         walls.append((c2, nn, nd))
 
-    # Add entry/exit
     def add_entry_exit(self, entry, exit):
         er, ec, edir = entry
         xr, xc, xdir = exit
         self.grid[er][ec].walls[edir] = False
         self.grid[xr][xc].walls[xdir] = False
 
-    # Add complete outer boundary walls
     def add_outer_walls(self):
         for c in range(self.cols):
             self.grid[0][c].walls["N"] = True
-            self.grid[self.rows-1][c].walls["S"] = True
+            self.grid[self.rows - 1][c].walls["S"] = True
         for r in range(self.rows):
             self.grid[r][0].walls["W"] = True
-            self.grid[r][self.cols-1].walls["E"] = True
+            self.grid[r][self.cols - 1].walls["E"] = True
 
 # ---------------- A* Solver ----------------
 
@@ -150,10 +144,10 @@ def add_wall(world, r, c, direction, x, y, sx, sy, boundary=False):
     suffix = "_b" if boundary else ""
     model_name = f"wall_r{r}_c{c}_{direction}{suffix}"
     model = SubElement(world, "model", {"name": model_name})
-    
     SubElement(model, "static").text = "true"
+
     pose = SubElement(model, "pose")
-    pose.text = f"{x} {y} {WALL_HEIGHT/2} 0 0 0"
+    pose.text = f"{x} {y} {WALL_HEIGHT / 2} 0 0 0"
 
     link = SubElement(model, "link", {"name": "link"})
     for tag in ["collision", "visual"]:
@@ -163,6 +157,23 @@ def add_wall(world, r, c, direction, x, y, sx, sy, boundary=False):
         size = SubElement(box, "size")
         size.text = f"{sx} {sy} {WALL_HEIGHT}"
 
+def add_marker(world, name, x, y, color):
+    model = SubElement(world, "model", {"name": name})
+    SubElement(model, "static").text = "true"
+
+    pose = SubElement(model, "pose")
+    pose.text = f"{x} {y} 0.05 0 0 0"
+
+    link = SubElement(model, "link", {"name": "link"})
+    visual = SubElement(link, "visual", {"name": "visual"})
+    geom = SubElement(visual, "geometry")
+    sphere = SubElement(geom, "sphere")
+    SubElement(sphere, "radius").text = "0.15"
+
+    material = SubElement(visual, "material")
+    SubElement(material, "ambient").text = color
+    SubElement(material, "diffuse").text = color
+
 def save_world(maze, filename):
     sdf = Element("sdf", {"version": "1.6"})
     world = SubElement(sdf, "world", {"name": "maze"})
@@ -170,7 +181,7 @@ def save_world(maze, filename):
     include = SubElement(world, "include")
     uri = SubElement(include, "uri")
     uri.text = "model://ground_plane"
-    
+
     for r in range(maze.rows):
         for c in range(maze.cols):
             cell = maze.grid[r][c]
@@ -178,88 +189,34 @@ def save_world(maze, filename):
             x0 -= CELL_SIZE / 2
             y0 -= CELL_SIZE / 2
 
-            # North wall
             if cell.walls["N"]:
-                boundary = (r == 0)
-                add_wall(world, r, c, "N", x0 + CELL_SIZE/2, y0 + CELL_SIZE,
-                         CELL_SIZE, WALL_THICKNESS, boundary)
-            # West wall
+                add_wall(world, r, c, "N",
+                         x0 + CELL_SIZE / 2, y0 + CELL_SIZE,
+                         CELL_SIZE, WALL_THICKNESS, r == 0)
+
             if cell.walls["W"]:
-                boundary = (c == 0)
-                add_wall(world, r, c, "W", x0, y0 + CELL_SIZE/2,
-                         WALL_THICKNESS, CELL_SIZE, boundary)
-            # South wall (only bottom row)
-            if cell.walls["S"] and r == maze.rows-1:
-                boundary = True
-                add_wall(world, r, c, "S", x0 + CELL_SIZE/2, y0,
-                         CELL_SIZE, WALL_THICKNESS, boundary)
-            # East wall (only rightmost column)
-            if cell.walls["E"] and c == maze.cols-1:
-                boundary = True
-                add_wall(world, r, c, "E", x0 + CELL_SIZE, y0 + CELL_SIZE/2,
-                         WALL_THICKNESS, CELL_SIZE, boundary)
+                add_wall(world, r, c, "W",
+                         x0, y0 + CELL_SIZE / 2,
+                         WALL_THICKNESS, CELL_SIZE, c == 0)
+
+            if cell.walls["S"] and r == maze.rows - 1:
+                add_wall(world, r, c, "S",
+                         x0 + CELL_SIZE / 2, y0,
+                         CELL_SIZE, WALL_THICKNESS, True)
+
+            if cell.walls["E"] and c == maze.cols - 1:
+                add_wall(world, r, c, "E",
+                         x0 + CELL_SIZE, y0 + CELL_SIZE / 2,
+                         WALL_THICKNESS, CELL_SIZE, True)
+
+    # ---- Start & Goal Markers ----
+    sx, sy = cell_center_world(maze, 0, 0)
+    gx, gy = cell_center_world(maze, maze.rows - 1, maze.cols - 1)
+    add_marker(world, "start_point", sx, sy, "0 1 0 1")
+    add_marker(world, "goal_point", gx, gy, "1 0 0 1")
 
     ElementTree(sdf).write(filename)
     print(f"[OK] Gazebo world saved: {filename}")
-
-# ---------------- Images ----------------
-
-def draw_arrow(draw, px, py, d, color):
-    s = 8
-    if d == "N":
-        pts = [(px, py-s), (px-s, py+s), (px+s, py+s)]
-    elif d == "S":
-        pts = [(px, py+s), (px-s, py-s), (px+s, py-s)]
-    elif d == "E":
-        pts = [(px+s, py), (px-s, py-s), (px-s, py+s)]
-    else:
-        pts = [(px-s, py), (px+s, py-s), (px+s, py+s)]
-    draw.polygon(pts, fill=color)
-
-def save_top_view(maze, entry, exit, path, filename):
-    w = maze.cols * CELL_SIZE * PIXELS_PER_METER
-    h = maze.rows * CELL_SIZE * PIXELS_PER_METER
-    img = Image.new("RGB", (int(w), int(h)), "white")
-    draw = ImageDraw.Draw(img)
-
-    for r in range(maze.rows):
-        for c in range(maze.cols):
-            cell = maze.grid[r][c]
-            x0, y0 = cell_center_world(maze, r, c)
-            x0 -= CELL_SIZE / 2
-            y0 -= CELL_SIZE / 2
-
-            if cell.walls["N"]:
-                draw.line([world_to_px(x0, y0+CELL_SIZE, maze),
-                           world_to_px(x0+CELL_SIZE, y0+CELL_SIZE, maze)],
-                          fill="black", width=3)
-            if cell.walls["W"]:
-                draw.line([world_to_px(x0, y0, maze),
-                           world_to_px(x0, y0+CELL_SIZE, maze)],
-                          fill="black", width=3)
-            # Draw South wall of bottom row
-            if cell.walls["S"] and r == maze.rows-1:
-                draw.line([world_to_px(x0, y0, maze),
-                           world_to_px(x0+CELL_SIZE, y0, maze)],
-                          fill="black", width=3)
-            # Draw East wall of rightmost column
-            if cell.walls["E"] and c == maze.cols-1:
-                draw.line([world_to_px(x0+CELL_SIZE, y0, maze),
-                           world_to_px(x0+CELL_SIZE, y0+CELL_SIZE, maze)],
-                          fill="black", width=3)
-
-    if path:
-        pts = [world_to_px(*cell_center_world(maze, r, c), maze) for r, c in path]
-        draw.line(pts, fill="red", width=4)
-
-    ex, ey = cell_center_world(maze, entry[0], entry[1])
-    gx, gy = cell_center_world(maze, exit[0], exit[1])
-
-    draw_arrow(draw, *world_to_px(ex, ey, maze), entry[2], "green")
-    draw_arrow(draw, *world_to_px(gx, gy, maze), exit[2], "blue")
-
-    img.save(filename)
-    print(f"[OK] Image saved: {filename}")
 
 # ---------------- Main ----------------
 
@@ -272,24 +229,15 @@ def main():
     args = p.parse_args()
 
     maze = Maze(args.rows, args.cols)
-    if args.algorithm == "dfs":
-        maze.generate_dfs()
-    else:
-        maze.generate_prim()
+    maze.generate_dfs() if args.algorithm == "dfs" else maze.generate_prim()
 
     entry = (0, 0, "W")
-    exit = (args.rows-1, args.cols-1, "E")
+    exit = (args.rows - 1, args.cols - 1, "E")
 
-    maze.add_outer_walls()       # enforce full boundary
+    maze.add_outer_walls()
     maze.add_entry_exit(entry, exit)
 
-    path = astar(maze, (entry[0], entry[1]), (exit[0], exit[1]))
-
     save_world(maze, args.output)
-    save_top_view(maze, entry, exit, None,
-                  args.output.replace(".world", "_topview.png"))
-    save_top_view(maze, entry, exit, path,
-                  args.output.replace(".world", "_solution.png"))
 
 if __name__ == "__main__":
     main()
