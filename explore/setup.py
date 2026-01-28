@@ -24,7 +24,8 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'explorer = explore.maze_explorer:main'
+            'explorer = explore.maze_explorer:main',
+            'manager = explore.mission_manager:main' 
         ],
     },
 )
