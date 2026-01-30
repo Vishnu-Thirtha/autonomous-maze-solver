@@ -9,12 +9,15 @@ from PIL import Image, ImageDraw
 # ---------------- Parameters ----------------
 
 CELL_SIZE = 1.0
-WALL_THICKNESS = 0.1
+MIN_WALL_THICKNESS = 0.06
+MAX_WALL_THICKNESS = 0.16
 WALL_HEIGHT = 1.0
 PIXELS_PER_METER = 100
 
 # ---------------- Maze Structures ----------------
 
+def random_wall_thickness():
+    return random.uniform(MIN_WALL_THICKNESS, MAX_WALL_THICKNESS)
 class Cell:
     def __init__(self, r, c):
         self.r = r
@@ -192,22 +195,22 @@ def save_world(maze, filename):
             if cell.walls["N"]:
                 add_wall(world, r, c, "N",
                          x0 + CELL_SIZE / 2, y0 + CELL_SIZE,
-                         CELL_SIZE, WALL_THICKNESS, r == 0)
+                         CELL_SIZE, random_wall_thickness(), r == 0)
 
             if cell.walls["W"]:
                 add_wall(world, r, c, "W",
                          x0, y0 + CELL_SIZE / 2,
-                         WALL_THICKNESS, CELL_SIZE, c == 0)
+                         random_wall_thickness(), CELL_SIZE, c == 0)
 
             if cell.walls["S"] and r == maze.rows - 1:
                 add_wall(world, r, c, "S",
                          x0 + CELL_SIZE / 2, y0,
-                         CELL_SIZE, WALL_THICKNESS, True)
+                         CELL_SIZE, random_wall_thickness(), True)
 
             if cell.walls["E"] and c == maze.cols - 1:
                 add_wall(world, r, c, "E",
                          x0 + CELL_SIZE, y0 + CELL_SIZE / 2,
-                         WALL_THICKNESS, CELL_SIZE, True)
+                         random_wall_thickness(), CELL_SIZE, True)
 
     # ---- Start & Goal Markers ----
     sx, sy = cell_center_world(maze, 0, 0)
