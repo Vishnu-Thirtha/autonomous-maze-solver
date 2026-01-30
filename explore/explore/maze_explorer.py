@@ -34,6 +34,10 @@ class FrontierExplorer(Node):
         self.cost_weight = 0.05
         self.randomness = 0.1
 
+        # ---- NEW: frontier density parameters ----
+        self.unknown_window = 3          # radius (cells)
+        self.min_unknown_ratio = 0.4     # density threshold
+
         # ---------------- TF ----------------
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
@@ -67,6 +71,9 @@ class FrontierExplorer(Node):
         self.goal_visible = False
         self.current_target = None
         self.goal_start_time = None
+
+        # ---- NEW: goal commitment flag ----
+        self.goal_committed = False
 
         self.create_timer(1.0, self.explore)
 
@@ -117,6 +124,23 @@ class FrontierExplorer(Node):
             return self.unknown_cost
         return cost
 
+    # ---- NEW: unknown density check ----
+    def unknown_density(self, x, y):
+        data = np.array(self.costmap.data).reshape(
+            self.costmap.info.height,
+            self.costmap.info.width
+        )
+        w = self.unknown_window
+        y0 = max(0, y - w)
+        y1 = min(data.shape[0], y + w + 1)
+        x0 = max(0, x - w)
+        x1 = min(data.shape[1], x + w + 1)
+
+        window = data[y0:y1, x0:x1]
+        unknowns = np.sum(window == -1)
+        total = window.size
+        return unknowns / total if total > 0 else 0.0
+
     # ---------------- Frontier Selection ----------------
     def choose_frontier(self, rx, ry):
         worlds = [self.cell_to_world(x, y) for x, y in self.frontiers]
@@ -130,23 +154,33 @@ class FrontierExplorer(Node):
             d_robot = math.hypot(wx - rx, wy - ry)
             d_start = math.hypot(wx - self.start_pose[0], wy - self.start_pose[1])
             cost = self.cell_cost(x, y)
-            
+
             if d_robot < self.min_frontier_dist:
                 continue
-            
             if d_start < self.min_start_dist:
                 continue
-            
+
+            # ---- NEW: density filter ----
+            if self.unknown_density(x, y) < self.min_unknown_ratio:
+                continue
+
             dist_score = (d_robot/self.preferred_dist if d_robot <= self.preferred_dist
                           else (1.0 + (d_robot - self.preferred_dist)/self.max_frontier_dist))
-            score = self.distance_weight*dist_score + d_start - self.cost_weight*cost + random.uniform(-self.randomness, self.randomness)
+            score = (
+                self.distance_weight * dist_score
+                + d_start
+                - self.cost_weight * cost
+                + random.uniform(-self.randomness, self.randomness)
+            )
             scored.append((score, (x, y)))
 
         if not scored:
             return min(
                 self.frontiers,
-                key=lambda f: math.hypot(self.cell_to_world(f[0], f[1])[0]-rx,
-                                         self.cell_to_world(f[0], f[1])[1]-ry)
+                key=lambda f: math.hypot(
+                    self.cell_to_world(f[0], f[1])[0] - rx,
+                    self.cell_to_world(f[0], f[1])[1] - ry
+                )
             )
         return max(scored, key=lambda s: s[0])[1]
 
@@ -181,38 +215,6 @@ class FrontierExplorer(Node):
             m.color.b = 1.0
             m.color.a = 0.7
             ma.markers.append(m)
-        # Start marker
-        if self.start_pose:
-            m_start = Marker()
-            m_start.header.frame_id = "map"
-            m_start.header.stamp = self.get_clock().now().to_msg()
-            m_start.ns = "start"
-            m_start.id = 999
-            m_start.type = Marker.SPHERE
-            m_start.action = Marker.ADD
-            m_start.pose.position.x = self.start_pose[0]
-            m_start.pose.position.y = self.start_pose[1]
-            m_start.pose.position.z = 0.1
-            m_start.scale.x = m_start.scale.y = m_start.scale.z = 0.25
-            m_start.color.g = 1.0
-            m_start.color.a = 1.0
-            ma.markers.append(m_start)
-        # Goal marker if visible
-        if self.goal_visible and self.goal_pose:
-            m_goal = Marker()
-            m_goal.header.frame_id = "map"
-            m_goal.header.stamp = self.get_clock().now().to_msg()
-            m_goal.ns = "goal"
-            m_goal.id = 1000
-            m_goal.type = Marker.SPHERE
-            m_goal.action = Marker.ADD
-            m_goal.pose.position.x = self.goal_pose[0]
-            m_goal.pose.position.y = self.goal_pose[1]
-            m_goal.pose.position.z = 0.1
-            m_goal.scale.x = m_goal.scale.y = m_goal.scale.z = 0.3
-            m_goal.color.r = 1.0
-            m_goal.color.a = 1.0
-            ma.markers.append(m_goal)
         self.frontier_pub.publish(ma)
 
     def publish_current_target(self):
@@ -239,24 +241,29 @@ class FrontierExplorer(Node):
             return
 
         pose = self.get_robot_pose()
-        if pose is None:
+        if pose is None or self.goal_pose is None:
             return
 
         rx, ry = pose
         gx, gy = self.goal_pose
-        
-        # Compute distance to goal
+
         dist_to_goal = math.hypot(gx - rx, gy - ry)
 
-        # If within threshold → goal reached
+        # ---- NEW: hard termination ----
         if dist_to_goal <= self.goal_reached_tol:
             if not getattr(self, "goal_reached", False):
                 self.get_logger().info("🎯 Goal reached — stopping exploration!")
                 self.goal_reached = True
             return
-        if dist_to_goal <= 2.0 and (self.current_target != self.goal_pose):
-            self.get_logger().info("🎯 Goal nearby — moving directly!")
+
+        # ---- NEW: commit to goal, suspend exploration ----
+        if dist_to_goal <= 2.0 and not self.goal_committed:
+            self.get_logger().info("🎯 Goal detected — committing to goal!")
+            self.goal_committed = True
             self.send_goal(gx, gy)
+            return
+
+        if self.goal_committed:
             return
 
         # Normal frontier exploration
@@ -264,6 +271,7 @@ class FrontierExplorer(Node):
             dist = math.hypot(self.current_target[0]-rx, self.current_target[1]-ry)
             if dist < 0.8 or time.time() - self.goal_start_time > self.goal_timeout:
                 self.current_target = None
+
         if self.current_target is None:
             fx, fy = self.choose_frontier(rx, ry)
             wx, wy = self.cell_to_world(fx, fy)
