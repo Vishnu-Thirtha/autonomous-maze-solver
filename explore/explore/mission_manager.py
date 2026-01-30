@@ -9,8 +9,10 @@ from tf2_ros import Buffer, TransformListener
 import math
 import time
 import numpy as np
+import os
 
 CELL_SIZE = 1.0  # meters per cell
+
 
 class MissionManager(Node):
 
@@ -18,9 +20,17 @@ class MissionManager(Node):
         super().__init__('mission_manager')
 
         # ---------------- Parameters ----------------
-        self.goal_reached_tol = 0.4   # meters
+        self.goal_reached_tol = 1.0  # meters
         self.rows = self.declare_parameter("rows", 15).value
         self.cols = self.declare_parameter("cols", 15).value
+
+        # ---------------- Metrics file ----------------
+        self.metrics_dir = os.path.expanduser("~/mission_logs")
+        os.makedirs(self.metrics_dir, exist_ok=True)
+        self.metrics_file = os.path.join(
+            self.metrics_dir,
+            f"mission_{int(time.time())}.txt"
+        )
 
         # ---------------- TF ----------------
         self.tf_buffer = Buffer()
@@ -38,15 +48,17 @@ class MissionManager(Node):
 
         # ---------------- State ----------------
         self.map = None
-        self.start_pose = None   # in meters
-        self.goal_pose = None    # in meters
+        self.start_pose = None
+        self.goal_pose = None
         self.start_time = time.time()
         self.goal_announced = False
 
         # ---------------- Timer ----------------
         self.create_timer(1.0, self.update)
 
-        self.get_logger().info(f"Mission Manager started with maze dim: {self.rows} x {self.cols}")
+        self.get_logger().info(
+            f"Mission Manager started with maze dim: {self.rows} x {self.cols}"
+        )
 
     # ---------------- Map callback ----------------
     def map_callback(self, msg):
@@ -56,14 +68,12 @@ class MissionManager(Node):
 
     # ---------------- Initialize start/goal ----------------
     def initialize_start_goal(self):
-        # Align with robot spawn (leftmost column, top row)
-        x_spawn = 0 * CELL_SIZE + CELL_SIZE / 2
+        x_spawn = CELL_SIZE / 2
         y_spawn = (self.rows - 1) * CELL_SIZE + CELL_SIZE / 2
         self.start_pose = (x_spawn, y_spawn)
 
-        # Goal: rightmost column, bottom row
-        x_goal = (self.cols - 1) * CELL_SIZE 
-        y_goal = 0 * CELL_SIZE 
+        x_goal = (self.cols - 1) * CELL_SIZE
+        y_goal = 0.0
         self.goal_pose = (x_goal, y_goal)
 
         self.publish_goal_marker()
@@ -83,10 +93,14 @@ class MissionManager(Node):
 
     # ---------------- Publish markers ----------------
     def publish_start_marker(self):
-        self.start_pub.publish(self.make_marker(*self.start_pose, 0.0, 1.0, 0.0, "start"))
+        self.start_pub.publish(
+            self.make_marker(*self.start_pose, 0.0, 1.0, 0.0, "start")
+        )
 
     def publish_goal_marker(self):
-        self.goal_pub.publish(self.make_marker(*self.goal_pose, 1.0, 0.0, 0.0, "goal"))
+        self.goal_pub.publish(
+            self.make_marker(*self.goal_pose, 1.0, 0.0, 0.0, "goal")
+        )
 
     def make_marker(self, x, y, r, g, b, ns):
         m = Marker()
@@ -113,18 +127,28 @@ class MissionManager(Node):
             return 0.0
         data = np.array(self.map.data)
         explored = np.sum(data >= 0)
-        total = data.size
-        return 100.0 * explored / total
+        return 100.0 * explored / data.size
+
+    # ---------------- Save metrics ----------------
+    def save_metrics(self, elapsed, explored_pct, dist):
+        with open(self.metrics_file, "w") as f:
+            f.write(f"mission_time_sec: {elapsed:.2f}\n")
+            f.write(f"explored_percentage: {explored_pct:.1f}\n")
+            f.write(f"final_distance_to_goal_m: {dist:.2f}\n")
+            f.write(f"maze_rows: {self.rows}\n")
+            f.write(f"maze_cols: {self.cols}\n")
+            f.write(f"start_pose_m: {self.start_pose}\n")
+            f.write(f"goal_pose_m: {self.goal_pose}\n")
+            f.write(f"timestamp_unix: {time.time():.2f}\n")
+
+        self.get_logger().info(f"📁 Metrics saved to {self.metrics_file}")
 
     # ---------------- Update loop ----------------
     def update(self):
         if self.map is None:
             return
 
-        # Always publish start marker
         self.publish_start_marker()
-
-        # Always publish goal marker
         self.publish_goal_marker()
 
         pose = self.get_robot_pose()
@@ -137,15 +161,17 @@ class MissionManager(Node):
         explored_pct = self.compute_explored_percentage()
         elapsed = time.time() - self.start_time
 
-        # Log metrics only when goal reached
         if dist <= self.goal_reached_tol and not self.goal_announced:
             self.goal_announced = True
             self.status_pub.publish(Bool(data=True))
+
+            self.save_metrics(elapsed, explored_pct, dist)
+
             self.get_logger().info("🎯 GOAL REACHED — Mission Complete")
             self.get_logger().info(
-                f"Time taken: {elapsed:.2f}s | "
-                f"Map explored: {explored_pct:.1f}% | "
-                f"Goal distance: {dist:.2f} m"
+                f"Time: {elapsed:.2f}s | "
+                f"Explored: {explored_pct:.1f}% | "
+                f"Final dist: {dist:.2f} m"
             )
 
 
