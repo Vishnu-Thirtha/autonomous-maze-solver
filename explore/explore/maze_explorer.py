@@ -28,7 +28,7 @@ class FrontierExplorer(Node):
         self.min_start_dist = 2.0
         self.preferred_dist = 2.5
         self.max_frontier_dist = 8.0
-        self.goal_reached_tol = 1.0
+        self.goal_reached_tol = 2.0
 
         self.distance_weight = 1.2
         self.cost_weight = 0.05
