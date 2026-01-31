@@ -25,7 +25,8 @@ setup(
     entry_points={
         'console_scripts': [
             'explorer = explore.maze_explorer:main',
-            'manager = explore.mission_manager:main' 
+            'manager = explore.mission_manager:main',
+            'turning_assist = explore.turning_assist:main' 
         ],
     },
 )
