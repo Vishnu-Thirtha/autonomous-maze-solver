@@ -6,9 +6,8 @@ from nav2_msgs.action import FollowPath
 from nav_msgs.msg import Path
 from geometry_msgs.msg import PoseStamped
 from rclpy.action import ActionClient
-from collections import deque
+from action_msgs.msg import GoalStatus
 import math
-import time
 
 
 class TurningAssist(Node):
@@ -16,177 +15,151 @@ class TurningAssist(Node):
     def __init__(self):
         super().__init__('turning_assist')
 
-        # ---------------- Parameters ----------------
-        self.stuck_time = 2.0                # seconds to consider robot stuck
-        self.movement_threshold = 0.5       # meters
-        self.assist_start_fraction = 0.8     # start with 80% of plan
-        self.assist_fraction_step = 0.05     # reduce 5% each attempt
-        self.min_assist_fraction = 0.05      # never go below 5%
+        self.goal_reached_tol = 0.4  # meters
 
         # ---------------- Subscribers ----------------
-        self.path_sub = self.create_subscription(
-            Path, '/plan', self.path_callback, 10)
-        self.odom_sub = self.create_subscription(
-            PoseStamped, '/robot_pose', self.odom_callback, 10)
+        self.plan_sub = self.create_subscription(
+            Path, '/plan', self.plan_callback, 10)
+        self.pose_sub = self.create_subscription(
+            PoseStamped, '/robot_pose', self.pose_callback, 10)
 
         # ---------------- Action Client ----------------
         self.client = ActionClient(self, FollowPath, 'follow_path')
+        self.goal_handle = None
 
         # ---------------- State ----------------
         self.original_plan = None
-        self.last_robot_pose = None
+        self.robot_pose = None
         self.assist_active = False
-        self.current_fraction = self.assist_start_fraction
+        self.assist_handled = False  # <-- new flag to only handle first stuck event
+        self.current_subgoal = None
 
-        # For stuck detection
-        self.last_checked_pose = None
-        self.last_checked_time = None
-
-        # ---------------- Timer ----------------
-        self.create_timer(0.15, self.monitor)
-
-        self.get_logger().info("TurningAssist node started")
+        self.get_logger().info("TurningAssist started")
 
     # ---------------- Callbacks ----------------
-    def path_callback(self, msg: Path):
+    def plan_callback(self, msg: Path):
         if not msg.poses:
             return
         self.original_plan = msg
         self.assist_active = False
-        self.current_fraction = self.assist_start_fraction
-        self.get_logger().info(f"Received global plan with {len(msg.poses)} poses")
+        self.assist_handled = False
+        self.current_subgoal = None
 
-    def odom_callback(self, msg: PoseStamped):
-        self.last_robot_pose = (msg.pose.position.x, msg.pose.position.y)
-        if self.last_checked_pose is None:
-            self.last_checked_pose = self.last_robot_pose
-            self.last_checked_time = time.time()
+        self.get_logger().info(f"Received global plan ({len(msg.poses)} poses)")
 
-    # ---------------- Monitor ----------------
-    def monitor(self):
-        if self.original_plan is None:
-            # Only warn once
-            if not hasattr(self, "_warned_no_plan"):
-                self.get_logger().warn("No global plan received yet")
-                self._warned_no_plan = True
-            return
+        # Send full plan first
+        self.send_plan(msg)
 
-        if self.last_robot_pose is None:
-            # Only warn once
-            if not hasattr(self, "_warned_no_odom"):
-                self.get_logger().warn("No odometry received yet")
-                self._warned_no_odom = True
-            return
+    def pose_callback(self, msg: PoseStamped):
+        self.robot_pose = msg.pose.position
 
-        # Reset warnings once both plan and odom exist
-        if hasattr(self, "_warned_no_plan"):
-            del self._warned_no_plan
-        if hasattr(self, "_warned_no_odom"):
-            del self._warned_no_odom
-
-        # ---------------- Check if robot is stuck ----------------
-        if self.robot_stuck():
-            if not self.assist_active:
-                self.get_logger().warn("Robot stuck — starting assist")
-                self.assist_active = True
-                self.current_fraction = self.assist_start_fraction
-            self.attempt_assist()
-        else:
-            if self.assist_active:
-                self.get_logger().info("Robot moved — resuming original plan")
-                self.send_subgoal(self.original_plan)
-                self.assist_active = False
-                self.current_fraction = self.assist_start_fraction
-
-
-    # ---------------- Robot Stuck Check ----------------
-    def robot_stuck(self):
-        """
-        Returns True if the robot has not made significant movement over
-        `stuck_time` AND the global plan is not progressing.
-        """
-
-        if self.last_robot_pose is None or self.original_plan is None:
-            return False
-
-        now = time.time()
-
-        # --- Track robot movement ---
-        if not hasattr(self, "_pose_history"):
-            self._pose_history = deque(maxlen=2)  # store last 5 poses
-            self._time_history = deque(maxlen=2)
-        
-        self._pose_history.append(self.last_robot_pose)
-        self._time_history.append(now)
-
-        if len(self._pose_history) < 2:
-            return False
-
-        # Compute distance moved over last few poses
-        x0, y0 = self._pose_history[0]
-        x1, y1 = self._pose_history[-1]
-        dist_moved = math.hypot(x1 - x0, y1 - y0)
-        time_elapsed = self._time_history[-1] - self._time_history[0]
-
-        if time_elapsed < self.stuck_time:
-            return False
-
-        # --- Track repeated plan lengths ---
-        if not hasattr(self, "_plan_history"):
-            self._plan_history = deque(maxlen=5)  # store last 5 plan lengths
-
-        if self.original_plan:
-            self._plan_history.append(len(self.original_plan.poses))
-
-        repeated_plan = len(set(self._plan_history)) == 1 if len(self._plan_history) == self._plan_history.maxlen else False
-
-        # Robot considered stuck if distance is small and plan is repeating
-        if dist_moved < 0.2 and repeated_plan:  # 0.2 m threshold
-            self.get_logger().warn(f"Robot stuck detected: moved {dist_moved:.3f}m over {time_elapsed:.1f}s, repeated plan")
-            return True
-
-        return False
-
-    # ---------------- Assist Logic ----------------
-    def attempt_assist(self):
-        total_poses = len(self.original_plan.poses)
-        fraction = self.current_fraction
-
-        while fraction >= self.min_assist_fraction:
-            index = max(1, int(total_poses * fraction)) - 1
-            truncated_plan = Path()
-            truncated_plan.header = self.original_plan.header
-            truncated_plan.poses = self.original_plan.poses[:index + 1]
-
-            self.get_logger().info(
-                f"Assist: sending {fraction*100:.0f}% of plan "
-                f"({index+1}/{total_poses} poses)"
-            )
-            self.send_subgoal(truncated_plan)
-
-            # brief wait to see if robot moves
-            time.sleep(0.5)
-
-            if not self.robot_stuck():
-                self.get_logger().info("Assist successful — robot started moving")
-                return
-
-            fraction -= self.assist_fraction_step
-
-        self.get_logger().error("Assist failed — robot still stuck")
-
-    # ---------------- Send Subgoal ----------------
-    def send_subgoal(self, path: Path):
-        if not path.poses:
-            return
-
+    # ---------------- Action Handling ----------------
+    def send_plan(self, path: Path):
         if not self.client.wait_for_server(timeout_sec=1.0):
-            self.get_logger().warn("FollowPath action server not available")
+            self.get_logger().warn("FollowPath server unavailable")
             return
 
-        goal_msg = FollowPath.Goal()
-        goal_msg.path = path
-        self.client.send_goal_async(goal_msg)
+        goal = FollowPath.Goal()
+        goal.path = path
+
+        future = self.client.send_goal_async(goal)
+        future.add_done_callback(self.goal_response)
+
+    def goal_response(self, future):
+        goal_handle = future.result()
+        if not goal_handle.accepted:
+            self.get_logger().warn("FollowPath goal rejected")
+            return
+
+        # <<< Listen to result for Nav2 “no progress” feedback
+        result_future = goal_handle.get_result_async()
+        result_future.add_done_callback(self.goal_result_callback)
+
+        self.goal_handle = goal_handle
+
+    def goal_result_callback(self, future):
+        status = future.result().status
+
+        # ---- Handle success ----
+        if status == GoalStatus.STATUS_SUCCEEDED:
+            self.handle_success()
+
+        # ---- Handle first failure only ----
+        elif status == GoalStatus.STATUS_ABORTED:
+            if not self.assist_handled:
+                self.handle_failure()
+                self.assist_handled = True  # <-- mark that we reacted
+
+    # ---------------- Assist logic ----------------
+    def handle_failure(self):
+        self.get_logger().warn("Nav2 reports: FAILED TO MAKE PROGRESS")
+        self.assist_active = True
+
+        # Compute mid-turn index (90 deg)
+        mid_index = self.find_mid_turn_index()
+        if mid_index is None:
+            self.get_logger().warn("Path too short or turn too small — retry full plan")
+            self.send_plan(self.original_plan)
+            return
+
+        # Create truncated path up to mid-turn
+        truncated = Path()
+        truncated.header = self.original_plan.header
+        truncated.poses = self.original_plan.poses[:mid_index + 1]
+
+        self.current_subgoal = truncated.poses[-1].pose.position
+
+        self.get_logger().info(f"Assist: truncated path up to 90deg turn at pose {mid_index + 1}")
+        self.send_plan(truncated)
+
+    def handle_success(self):
+        # Reset assist_handled if robot made progress
+        self.assist_handled = False
+
+        if self.assist_active and self.current_subgoal is not None:
+            if self.subgoal_reached():
+                self.get_logger().info("Assist complete — resuming original goal")
+                self.assist_active = False
+                self.replan_to_original_goal()
+        else:
+            self.get_logger().info("Plan execution succeeded")
+
+    # ---------------- Geometry Helpers ----------------
+    def yaw_between(self, p1, p2):
+        dx = p2.position.x - p1.position.x
+        dy = p2.position.y - p1.position.y
+        return math.atan2(dy, dx)
+
+    def find_mid_turn_index(self):
+        poses = self.original_plan.poses
+        if len(poses) < 3:
+            return None
+
+        total_turn = 0
+        for i in range(1, len(poses)-1):
+            yaw_prev = self.yaw_between(poses[i-1].pose, poses[i].pose)
+            yaw_next = self.yaw_between(poses[i].pose, poses[i+1].pose)
+            d_yaw = yaw_next - yaw_prev
+            # wrap to [-pi, pi]
+            d_yaw = (d_yaw + math.pi) % (2*math.pi) - math.pi
+            total_turn += abs(d_yaw)
+            if total_turn >= math.pi/2:  # 90 degrees
+                return i+1
+        return None
+
+    def subgoal_reached(self):
+        if self.robot_pose is None or self.current_subgoal is None:
+            return False
+        dx = self.robot_pose.x - self.current_subgoal.x
+        dy = self.robot_pose.y - self.current_subgoal.y
+        return math.hypot(dx, dy) < self.goal_reached_tol
+
+    def replan_to_original_goal(self):
+        final_pose = self.original_plan.poses[-1]
+        new_plan = Path()
+        new_plan.header = self.original_plan.header
+        new_plan.poses = [final_pose]
+        self.send_plan(new_plan)
 
 
 # ---------------- Main ----------------
