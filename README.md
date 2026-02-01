@@ -1,12 +1,44 @@
-# Maze Solver
+# Maze Robot Project
+
+This repository contains two main components for autonomous maze navigation using ROS 2:  
+
+1. **Maze Creation** – procedural generation of Gazebo-compatible mazes  
+2. **Maze Solver** – autonomous exploration and goal-directed navigation using SLAM and Nav2  
+
+---
+
+## Maze Creation
+
+This component builds the logic for generating mazes for the robot. Mazes are generated using:
+
+- Depth First Search (DFS)  
+- Prim's algorithm  
+
+Each maze is a **perfect maze** (no loops) and is translated into a **Gazebo world** for the robot to navigate.  
+
+### Features
+
+- Fully enclosed outer boundaries with **one entry and one exit**  
+- Gazebo-compatible walls with **brick texture**  
+- Floor plane with **asphalt texture**  
+- Top-view images of the maze and the **solution path**  
+- Supports both **DFS** and **Prim's algorithm** for maze generation  
+
+### Demo
+
+Below is a demo of a generated 15x15 maze in Gazebo:
+
+![Maze in Gazebo](assets/maze.png)  
+
+---
+
+## Maze Solver
 
 This branch implements an **autonomous maze-solving system** using **SLAM** and **Nav2** in ROS 2.  
 
 The core component is a **Frontier Explorer node** that identifies unmapped regions and incrementally expands the exploration horizon until the goal is reached.
 
----
-
-## Features
+### Features
 
 - SLAM-based online map building  
 - Nav2 navigation and path planning  
@@ -14,9 +46,7 @@ The core component is a **Frontier Explorer node** that identifies unmapped regi
 - Goal-aware behavior that commits to the goal when detected  
 - Real-time visualization of frontiers and target in RViz  
 
----
-
-## Frontier Explorer Node
+### Frontier Explorer Node
 
 The `FrontierExplorer` node drives exploration with the following logic:  
 
@@ -26,9 +56,7 @@ The `FrontierExplorer` node drives exploration with the following logic:
 - Automatically switches from exploration to goal navigation when the goal is detected.  
 - Publishes all frontiers and the current target for RViz visualization.  
 
----
-
-## Demo
+### Demo
 
 The demo shows **simultaneous exploration in RViz** and the **robot motion in Gazebo**:
 
